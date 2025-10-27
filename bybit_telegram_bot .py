@@ -1,145 +1,150 @@
 
-import streamlit as st
-import asyncio
-import aiohttp
-import pandas as pd
-import time
-import os
+# ============================================
+#  arb_bot_telegram.py (v1.1 уведомления фикс)
+# ============================================
 
-# ==========================================================
-# 🔧 Настройки
-# ==========================================================
-REFRESH_INTERVAL = 10  # секунд
-CSV_LOG_FILE = "arbitrage_log.csv"
+import os, time, math, json, threading, logging
+from dataclasses import dataclass
+from typing import Dict, Optional, Tuple
+import ccxt, telebot
+from telebot import types
+from dotenv import load_dotenv
 
-EXCHANGES = {
-    "Binance": "https://api.binance.com/api/v3/ticker/bookTicker?symbol={}",
-    "Bybit": "https://api.bybit.com/v5/market/tickers?category=spot&symbol={}",
-    "OKX": "https://www.okx.com/api/v5/market/ticker?instId={}-USDT",
-    "KuCoin": "https://api.kucoin.com/api/v1/market/orderbook/level1?symbol={}",
-    "Bitget": "https://api.bitget.com/api/v2/spot/market/ticker?symbol={}_SPBL"
-}
+load_dotenv()
 
-# ==========================================================
-# 📡 Асинхронное получение цен
-# ==========================================================
-async def fetch_price(session, name, url):
+BINANCE_API_KEY = os.getenv("pIR80OjUofQCBMPyJAngEg695l4vQPNDHobxgbWugyIeYs8qzVaqXoXZ6O3pKpwJ", "")
+BINANCE_API_SECRET = os.getenv("2KFKdM4zYjoIUJ6NUbghSWFkAZwrN9WutZUskMUxYTWFqaCOLYRXA4iQo6Vbxj3f", "")
+BYBIT_API_KEY = os.getenv("bI2fcFjKVNY4W6oQs9", "")
+BYBIT_API_SECRET = os.getenv("QYawByd3Gz8BUXWebZpDMYircORbWY7zD2cV", "")
+OKX_API_KEY = os.getenv("6fbfe3bc-3a0a-42b9-985a-d681ec369c78", "")
+OKX_API_SECRET = os.getenv("1930C87E73EBC8D00B55F962FBCD9D93", "")
+OKX_PASSWORD = os.getenv("Movhafvx7.", "")
+
+TELEGRAM_TOKEN = "7400072123:AAH098YiSanx1R_0MZB9mk6qr2RuxhJvx_k"
+TELEGRAM_CHAT_ID = 537054215
+
+DRY_RUN = True
+POLL_INTERVAL = 1.5
+MIN_PROFIT_USD = 0.01
+MIN_SPREAD_PCT = 0.0001
+MAX_NOTIONAL_PER_TRADE_USD = 50.0
+
+WATCH_SYMBOLS = ["BTC/USDT", "ETH/USDT"]
+STATE_FILE = "arb_state.json"
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+logger = logging.getLogger("arb_bot")
+
+state_lock = threading.Lock()
+trade_enabled = False
+last_alerts = {}
+state = {"trades": [], "last_opportunity": None}
+
+@dataclass
+class Opportunity:
+    symbol: str
+    buy_ex: str
+    sell_ex: str
+    ask: float
+    bid: float
+    qty: float
+    notional: float
+    net_profit: float
+    spread_pct: float
+
+def to_float(x):
     try:
-        async with session.get(url, timeout=5) as resp:
-            data = await resp.json()
-            if name == "Binance":
-                return name, float(data["bidPrice"]), float(data["askPrice"])
-            elif name == "Bybit":
-                t = data["result"]["list"][0]
-                return name, float(t["bid1Price"]), float(t["ask1Price"])
-            elif name == "OKX":
-                t = data["data"][0]
-                return name, float(t["bidPx"]), float(t["askPx"])
-            elif name == "KuCoin":
-                t = data["data"]
-                return name, float(t["bestBid"]), float(t["bestAsk"])
-            elif name == "Bitget":
-                t = data["data"][0]
-                return name, float(t["buyOne"]), float(t["sellOne"])
-    except Exception:
-        return name, None, None
+        return float(x)
+    except: return 0.0
 
-async def get_prices(symbol):
-    tasks = []
-    async with aiohttp.ClientSession() as session:
-        for name, url in EXCHANGES.items():
-            if name == "OKX":
-                formatted = symbol.replace("USDT", "")
-            elif name == "Bitget":
-                formatted = symbol.replace("USDT", "USDT")
+def round_step(qty, step):
+    if step <= 0: return qty
+    return math.floor(qty / step) * step
+
+class ExchangeClient:
+    def __init__(self, name, api_key, secret, password=None):
+        self.name = name.lower()
+        if self.name == "binance":
+            self.ex = ccxt.binance({"apiKey": api_key, "secret": secret, "enableRateLimit": True})
+        elif self.name == "bybit":
+            self.ex = ccxt.bybit({"apiKey": api_key, "secret": secret, "enableRateLimit": True})
+        elif self.name == "okx":
+            self.ex = ccxt.okx({"apiKey": api_key, "secret": secret, "password": password, "enableRateLimit": True})
+        else:
+            raise ValueError(f"Неизвестная биржа: {name}")
+        logger.info(f"[{self.name}] загрузка маркетов...")
+        self.ex.load_markets()
+        logger.info(f"[{self.name}] загружено {len(self.ex.markets)} инструментов")
+    def fetch_order_book(self, symbol, limit=5):
+        try: return self.ex.fetch_order_book(symbol, limit=limit)
+        except Exception as e:
+            logger.debug(f"{self.name}: ошибка стакана {symbol}: {e}"); return {}
+    def fees(self):
+        f = getattr(self.ex, "fees", {}).get("trading", {})
+        return float(f.get("taker", 0.001)), float(f.get("maker", 0.001))
+
+bot = telebot.TeleBot(TELEGRAM_TOKEN, parse_mode="HTML")
+
+def main_menu():
+    kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    if trade_enabled: kb.add(types.KeyboardButton("⏸ Выключить торговлю"))
+    else: kb.add(types.KeyboardButton("▶️ Включить торговлю"))
+    kb.add(types.KeyboardButton("📊 Статус"), types.KeyboardButton("🧾 Последние сделки"))
+    return kb
+
+@bot.message_handler(commands=['start'])
+def cmd_start(m):
+    if m.chat.id != TELEGRAM_CHAT_ID: return
+    bot.send_message(TELEGRAM_CHAT_ID, f"🤖 Привет! Мониторинг активен.\nТорговля: {'включена ✅' if trade_enabled else 'выключена ⛔️'}", reply_markup=main_menu())
+
+@bot.message_handler(func=lambda m: True)
+def handle(m):
+    global trade_enabled
+    if m.chat.id != TELEGRAM_CHAT_ID: return
+    if m.text.startswith("▶️"): trade_enabled=True; bot.send_message(TELEGRAM_CHAT_ID,"✅ Торговля включена",reply_markup=main_menu())
+    elif m.text.startswith("⏸"): trade_enabled=False; bot.send_message(TELEGRAM_CHAT_ID,"⛔️ Торговля выключена",reply_markup=main_menu())
+    elif m.text.startswith("📊"): bot.send_message(TELEGRAM_CHAT_ID,f"⚙️ Торговля: {'включена ✅' if trade_enabled else 'выключена ⛔️'}",reply_markup=main_menu())
+    elif m.text.startswith("🧾"): bot.send_message(TELEGRAM_CHAT_ID,"Сделок пока нет (режим наблюдения)",reply_markup=main_menu())
+
+def monitor_loop():
+    logger.info("Запуск мониторинга (диагностика)")
+    binance=ExchangeClient("binance",BINANCE_API_KEY,BINANCE_API_SECRET)
+    bybit=ExchangeClient("bybit",BYBIT_API_KEY,BYBIT_API_SECRET)
+    okx=ExchangeClient("okx",OKX_API_KEY,OKX_API_SECRET,OKX_PASSWORD)
+    exchanges={"binance":binance,"bybit":bybit,"okx":okx}
+    while True:
+        try:
+            bids={}
+            for name,ex in exchanges.items():
+                ob=ex.fetch_order_book("BTC/USDT")
+                if ob and ob.get("bids"): bids[name]=ob["bids"][0][0]
+            if bids:
+                min_ex=min(bids,key=bids.get); max_ex=max(bids,key=bids.get)
+                spread=bids[max_ex]-bids[min_ex]
+                if spread>0.0:
+                    key=f"BTC/USDT:{min_ex}->{max_ex}"
+                    prev_net=last_alerts.get(key,0)
+                    if abs(spread-prev_net)>0.001:  # сниженный порог чувствительности
+                        last_alerts[key]=spread
+                        msg=(f"💰 <b>Арбитражная возможность</b>\nBTC/USDT\n"
+                             f"Купить на <b>{min_ex}</b> @ {bids[min_ex]:.2f}\n"
+                             f"Продать на <b>{max_ex}</b> @ {bids[max_ex]:.2f}\n"
+                             f"Потенц. прибыль: <b>+{spread:.2f} USDT</b>\n"
+                             f"Торговля: {'включена ✅' if trade_enabled else 'выключена ⛔️'}")
+                        bot.send_message(TELEGRAM_CHAT_ID,msg)
+                logger.info(f"📈 BTC/USDT → {', '.join([f'{k}:{v:.2f}' for k,v in bids.items()])} | Спред={spread:.2f} USDT ({min_ex}->{max_ex})")
             else:
-                formatted = symbol
-            tasks.append(fetch_price(session, name, url.format(formatted)))
-        results = await asyncio.gather(*tasks)
-    return {name: (bid, ask) for name, bid, ask in results if bid and ask}
+                logger.warning("Не удалось получить цены ни с одной биржи")
+        except Exception as e:
+            logger.warning(f"Ошибка мониторинга: {e}")
+        time.sleep(POLL_INTERVAL)
 
-# ==========================================================
-# 📊 Расчёт спредов
-# ==========================================================
-def calculate_spreads(prices, symbol):
-    rows = []
-    exchanges = list(prices.keys())
-    for buy_ex in exchanges:
-        for sell_ex in exchanges:
-            if buy_ex == sell_ex:
-                continue
-            buy_price = prices[buy_ex][1]  # ask
-            sell_price = prices[sell_ex][0]  # bid
-            spread = (sell_price - buy_price) / buy_price * 100
-            if spread > 0:
-                rows.append({
-                    "Монета": symbol,
-                    "Купить на": buy_ex,
-                    "Продать на": sell_ex,
-                    "Buy цена": round(buy_price, 2),
-                    "Sell цена": round(sell_price, 2),
-                    "Спред %": round(spread, 3),
-                    "Время": time.strftime('%H:%M:%S')
-                })
-    df = pd.DataFrame(rows)
-    if not df.empty:
-        df = df.sort_values("Спред %", ascending=False)
-    return df
+def telegram_loop():
+    logger.info("Запуск Telegram-интерфейса")
+    bot.infinity_polling(timeout=60,long_polling_timeout=60)
 
-# ==========================================================
-# 🧾 Логирование в CSV
-# ==========================================================
-def log_to_csv(df):
-    if df.empty:
-        return
-    file_exists = os.path.isfile(CSV_LOG_FILE)
-    df.to_csv(CSV_LOG_FILE, mode='a', index=False, header=not file_exists, encoding='utf-8-sig')
-
-# ==========================================================
-# 🌐 Интерфейс Streamlit
-# ==========================================================
-st.set_page_config(page_title="Arbitrage Monitor", layout="wide")
-st.title("💰 Real-Time Crypto Arbitrage Monitor")
-
-# Мультиселект выбора монет
-default_symbols = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT"]
-symbols = st.multiselect(
-    "Выбери монеты для мониторинга:",
-    options=default_symbols + ["BNBUSDT", "DOGEUSDT", "ADAUSDT", "TONUSDT"],
-    default=default_symbols
-)
-
-st.write(f"⏱ Обновление каждые {REFRESH_INTERVAL} секунд.")
-placeholder = st.empty()
-
-while True:
-    start = time.time()
-    all_data = []
-    for symbol in symbols:
-        prices = asyncio.run(get_prices(symbol))
-        df_spreads = calculate_spreads(prices, symbol)
-        if not df_spreads.empty:
-            all_data.append(df_spreads)
-
-    st.markdown(f"**🕒 Последнее обновление:** {time.strftime('%H:%M:%S')}")
-
-    if all_data:
-        result = pd.concat(all_data)
-        log_to_csv(result)
-
-        # Цветовое выделение спредов
-        def color_spread(val):
-            if val >= 0.5:
-                color = 'background-color: #00FF00; color: black'  # ярко-зелёный
-            elif val >= 0.2:
-                color = 'background-color: #90EE90; color: black'  # светло-зелёный
-            else:
-                color = ''
-            return color
-
-        styled_df = result.style.applymap(color_spread, subset=["Спред %"])
-        st.dataframe(styled_df, use_container_width=True)
-    else:
-        st.info("Нет положительных спредов на данный момент.")
-
-    time.sleep(REFRESH_INTERVAL)
+if __name__=="__main__":
+    t1=threading.Thread(target=monitor_loop,daemon=True)
+    t2=threading.Thread(target=telegram_loop,daemon=True)
+    t1.start(); t2.start()
+    while True
