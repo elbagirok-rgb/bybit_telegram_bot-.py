@@ -1,219 +1,145 @@
-# ============================================================
-#   Arbitrage Bot v2.2 (Bybit ↔ OKX)
-#   💰 Минимальный спред, но без убыточных сделок
-#   ⚙️ Diagnostic Mode + Telegram управление
-# ============================================================
 
-import os, time, threading, logging
-import ccxt, telebot
-from telebot import types
+import streamlit as st
+import asyncio
+import aiohttp
+import pandas as pd
+import time
+import os
 
-# === НАСТРОЙКИ =============================================
-BYBIT_API_KEY    = "bI2fcFjKVNY4W6oQs9"
-BYBIT_API_SECRET = "QYawByd3Gz8BUXWebZpDMYircORbWY7zD2cV"
+# ==========================================================
+# 🔧 Настройки
+# ==========================================================
+REFRESH_INTERVAL = 10  # секунд
+CSV_LOG_FILE = "arbitrage_log.csv"
 
-OKX_API_KEY      = "6fbfe3bc-3a0a-42b9-985a-d681ec369c78"
-OKX_API_SECRET   = "1930C87E73EBC8D00B55F962FBCD9D93"
-OKX_PASSWORD     = "Movhafvx7."
+EXCHANGES = {
+    "Binance": "https://api.binance.com/api/v3/ticker/bookTicker?symbol={}",
+    "Bybit": "https://api.bybit.com/v5/market/tickers?category=spot&symbol={}",
+    "OKX": "https://www.okx.com/api/v5/market/ticker?instId={}-USDT",
+    "KuCoin": "https://api.kucoin.com/api/v1/market/orderbook/level1?symbol={}",
+    "Bitget": "https://api.bitget.com/api/v2/spot/market/ticker?symbol={}_SPBL"
+}
 
-TELEGRAM_TOKEN   = "7400072123:AAH098YiSanx1R_0MZB9mk6qr2RuxhJvx_k"
-TELEGRAM_CHAT_ID = 537054215
-
-# === ПАРАМЕТРЫ =============================================
-POLL_INTERVAL = 3.0        # частота обновления (сек)
-TRADE_QTY = 0.01           # объём для расчёта прибыли
-DRY_RUN = False             # реальная торговля (False = Live)
-DIAGNOSTIC_MODE = True      # выводит все спреды в консоль
-TAKER_FEE = 0.0006          # комиссия тейкера (0.06%)
-
-# === ПАРЫ ===================================================
-WATCH_PAIRS = [
-    "BTC/USDT", "ETH/USDT", "SOL/USDT", "BNB/USDT", "XRP/USDT",
-    "ADA/USDT", "DOGE/USDT", "AVAX/USDT", "LINK/USDT", "TRX/USDT",
-    "DOT/USDT", "MATIC/USDT", "OP/USDT", "ARB/USDT", "SUI/USDT",
-    "APT/USDT", "SEI/USDT", "NEAR/USDT", "FIL/USDT", "ATOM/USDT",
-    "LTC/USDT", "ETC/USDT", "UNI/USDT", "AAVE/USDT", "RNDR/USDT",
-    "INJ/USDT", "XMR/USDT", "EGLD/USDT", "CFX/USDT", "TON/USDT",
-    "IMX/USDT", "FTM/USDT", "PEPE/USDT", "XLM/USDT", "HBAR/USDT",
-    "MANA/USDT", "SAND/USDT", "THETA/USDT", "GALA/USDT", "CHZ/USDT"
-]
-
-# === ЛОГИРОВАНИЕ ===========================================
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
-log = logging.getLogger("arb_bot")
-
-# === ИНИЦИАЛИЗАЦИЯ БИРЖ ===================================
-bybit = ccxt.bybit({
-    "apiKey": BYBIT_API_KEY,
-    "secret": BYBIT_API_SECRET,
-    "enableRateLimit": True,
-    "options": {"defaultType": "swap"}
-})
-
-okx = ccxt.okx({
-    "apiKey": OKX_API_KEY,
-    "secret": OKX_API_SECRET,
-    "password": OKX_PASSWORD,
-    "enableRateLimit": True,
-    "options": {"defaultType": "swap"}
-})
-
-bybit.load_markets()
-okx.load_markets()
-
-# === TELEGRAM ==============================================
-bot = telebot.TeleBot(TELEGRAM_TOKEN, parse_mode="HTML")
-trade_enabled = False
-monitor_enabled = True
-
-# === БАЛАНСЫ ===============================================
-def get_bybit_free_usdt() -> float:
+# ==========================================================
+# 📡 Асинхронное получение цен
+# ==========================================================
+async def fetch_price(session, name, url):
     try:
-        resp = bybit.private_get_v5_account_wallet_balance({"accountType": "UNIFIED"})
-        coins = resp.get("result", {}).get("list", [])[0].get("coin", [])
-        for c in coins:
-            if c.get("coin") == "USDT":
-                val = c.get("availableToWithdraw") or c.get("walletBalance") or c.get("equity") or 0
-                return float(val)
-        return 0.0
-    except Exception as e:
-        log.warning(f"Bybit balance fetch error: {e}")
-        return 0.0
+        async with session.get(url, timeout=5) as resp:
+            data = await resp.json()
+            if name == "Binance":
+                return name, float(data["bidPrice"]), float(data["askPrice"])
+            elif name == "Bybit":
+                t = data["result"]["list"][0]
+                return name, float(t["bid1Price"]), float(t["ask1Price"])
+            elif name == "OKX":
+                t = data["data"][0]
+                return name, float(t["bidPx"]), float(t["askPx"])
+            elif name == "KuCoin":
+                t = data["data"]
+                return name, float(t["bestBid"]), float(t["bestAsk"])
+            elif name == "Bitget":
+                t = data["data"][0]
+                return name, float(t["buyOne"]), float(t["sellOne"])
+    except Exception:
+        return name, None, None
 
-def get_okx_free_usdt() -> float:
-    try:
-        balances = okx.fetch_balance()
-        usdt = balances.get("USDT", {})
-        return float(usdt.get("free", 0))
-    except Exception as e:
-        log.warning(f"OKX balance fetch error: {e}")
-        return 0.0
+async def get_prices(symbol):
+    tasks = []
+    async with aiohttp.ClientSession() as session:
+        for name, url in EXCHANGES.items():
+            if name == "OKX":
+                formatted = symbol.replace("USDT", "")
+            elif name == "Bitget":
+                formatted = symbol.replace("USDT", "USDT")
+            else:
+                formatted = symbol
+            tasks.append(fetch_price(session, name, url.format(formatted)))
+        results = await asyncio.gather(*tasks)
+    return {name: (bid, ask) for name, bid, ask in results if bid and ask}
 
-# === TELEGRAM МЕНЮ =========================================
-def main_menu():
-    kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    kb.add(types.KeyboardButton("💼 Балансы"))
-    kb.add(types.KeyboardButton("🟢 Запустить мониторинг") if not monitor_enabled else types.KeyboardButton("🛑 Остановить мониторинг"))
-    kb.add(types.KeyboardButton("▶️ Включить торговлю") if not trade_enabled else types.KeyboardButton("⏸ Выключить торговлю"))
-    return kb
-
-@bot.message_handler(commands=["start"])
-def cmd_start(m):
-    bot.send_message(
-        TELEGRAM_CHAT_ID,
-        "🤖 Арбитражный бот запущен.\nМониторинг активен ✅",
-        reply_markup=main_menu()
-    )
-
-@bot.message_handler(func=lambda m: True)
-def handle_buttons(m):
-    global trade_enabled, monitor_enabled
-    if m.chat.id != TELEGRAM_CHAT_ID:
-        return
-
-    if "Включить торговлю" in m.text:
-        trade_enabled = True
-        bot.send_message(TELEGRAM_CHAT_ID, "✅ Торговля включена", reply_markup=main_menu())
-    elif "Выключить торговлю" in m.text:
-        trade_enabled = False
-        bot.send_message(TELEGRAM_CHAT_ID, "⛔️ Торговля выключена", reply_markup=main_menu())
-    elif "Запустить мониторинг" in m.text:
-        monitor_enabled = True
-        bot.send_message(TELEGRAM_CHAT_ID, "🟢 Мониторинг запущен", reply_markup=main_menu())
-    elif "Остановить мониторинг" in m.text:
-        monitor_enabled = False
-        bot.send_message(TELEGRAM_CHAT_ID, "🛑 Мониторинг остановлен", reply_markup=main_menu())
-    elif "Балансы" in m.text:
-        bbal = get_bybit_free_usdt()
-        okbal = get_okx_free_usdt()
-        msg = f"💰 <b>Балансы:</b>\nBybit: {bbal:.2f} USDT\nOKX: {okbal:.2f} USDT"
-        bot.send_message(TELEGRAM_CHAT_ID, msg, reply_markup=main_menu())
-
-# === МОНИТОРИНГ ============================================
-def monitor_loop():
-    log.info("🚀 Запуск мониторинга (Smart Spread Mode)")
-    while True:
-        try:
-            if not monitor_enabled:
-                time.sleep(2)
+# ==========================================================
+# 📊 Расчёт спредов
+# ==========================================================
+def calculate_spreads(prices, symbol):
+    rows = []
+    exchanges = list(prices.keys())
+    for buy_ex in exchanges:
+        for sell_ex in exchanges:
+            if buy_ex == sell_ex:
                 continue
+            buy_price = prices[buy_ex][1]  # ask
+            sell_price = prices[sell_ex][0]  # bid
+            spread = (sell_price - buy_price) / buy_price * 100
+            if spread > 0:
+                rows.append({
+                    "Монета": symbol,
+                    "Купить на": buy_ex,
+                    "Продать на": sell_ex,
+                    "Buy цена": round(buy_price, 2),
+                    "Sell цена": round(sell_price, 2),
+                    "Спред %": round(spread, 3),
+                    "Время": time.strftime('%H:%M:%S')
+                })
+    df = pd.DataFrame(rows)
+    if not df.empty:
+        df = df.sort_values("Спред %", ascending=False)
+    return df
 
-            profitable = []
+# ==========================================================
+# 🧾 Логирование в CSV
+# ==========================================================
+def log_to_csv(df):
+    if df.empty:
+        return
+    file_exists = os.path.isfile(CSV_LOG_FILE)
+    df.to_csv(CSV_LOG_FILE, mode='a', index=False, header=not file_exists, encoding='utf-8-sig')
 
-            for symbol in WATCH_PAIRS:
-                try:
-                    ob_bybit = bybit.fetch_order_book(symbol, limit=5)
-                    ob_okx = okx.fetch_order_book(symbol, limit=5)
-                except Exception:
-                    continue
+# ==========================================================
+# 🌐 Интерфейс Streamlit
+# ==========================================================
+st.set_page_config(page_title="Arbitrage Monitor", layout="wide")
+st.title("💰 Real-Time Crypto Arbitrage Monitor")
 
-                if not ob_bybit or not ob_okx:
-                    continue
+# Мультиселект выбора монет
+default_symbols = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT"]
+symbols = st.multiselect(
+    "Выбери монеты для мониторинга:",
+    options=default_symbols + ["BNBUSDT", "DOGEUSDT", "ADAUSDT", "TONUSDT"],
+    default=default_symbols
+)
 
-                bybit_bid = ob_bybit["bids"][0][0] if ob_bybit["bids"] else 0
-                bybit_ask = ob_bybit["asks"][0][0] if ob_bybit["asks"] else 0
-                okx_bid = ob_okx["bids"][0][0] if ob_okx["bids"] else 0
-                okx_ask = ob_okx["asks"][0][0] if ob_okx["asks"] else 0
+st.write(f"⏱ Обновление каждые {REFRESH_INTERVAL} секунд.")
+placeholder = st.empty()
 
-                scenarios = [
-                    ("Bybit", "OKX", bybit_ask, okx_bid),
-                    ("OKX", "Bybit", okx_ask, bybit_bid)
-                ]
+while True:
+    start = time.time()
+    all_data = []
+    for symbol in symbols:
+        prices = asyncio.run(get_prices(symbol))
+        df_spreads = calculate_spreads(prices, symbol)
+        if not df_spreads.empty:
+            all_data.append(df_spreads)
 
-                for buy_ex, sell_ex, buy_price, sell_price in scenarios:
-                    if not buy_price or not sell_price:
-                        continue
-                    spread = sell_price - buy_price
-                    spread_pct = spread / buy_price if buy_price > 0 else 0
+    st.markdown(f"**🕒 Последнее обновление:** {time.strftime('%H:%M:%S')}")
 
-                    gross_profit = spread * TRADE_QTY
-                    fee_cost = (buy_price * TRADE_QTY * TAKER_FEE) + (sell_price * TRADE_QTY * TAKER_FEE)
-                    net_profit_after_fee = gross_profit - fee_cost
+    if all_data:
+        result = pd.concat(all_data)
+        log_to_csv(result)
 
-                    if DIAGNOSTIC_MODE:
-                        log.info(f"[{symbol}] {buy_ex}->{sell_ex} Δ={spread:.4f} | Gross={gross_profit:.4f} | "
-                                 f"Fees={fee_cost:.4f} | Net={net_profit_after_fee:.4f}")
+        # Цветовое выделение спредов
+        def color_spread(val):
+            if val >= 0.5:
+                color = 'background-color: #00FF00; color: black'  # ярко-зелёный
+            elif val >= 0.2:
+                color = 'background-color: #90EE90; color: black'  # светло-зелёный
+            else:
+                color = ''
+            return color
 
-                    # пропускаем убыточные сделки
-                    if net_profit_after_fee <= 0:
-                        continue
+        styled_df = result.style.applymap(color_spread, subset=["Спред %"])
+        st.dataframe(styled_df, use_container_width=True)
+    else:
+        st.info("Нет положительных спредов на данный момент.")
 
-                    profitable.append((symbol, buy_ex, sell_ex, buy_price, sell_price, spread, spread_pct, net_profit_after_fee))
-
-            # === Telegram уведомление ===
-            if profitable:
-                profitable.sort(key=lambda x: x[7], reverse=True)
-                top = profitable[:10]
-
-                text = "📈 <b>Топ арбитражных возможностей:</b>\n"
-                for sym, b, s, bp, sp, spr, sprpct, net in top:
-                    text += (
-                        f"\n<b>{sym}</b>  {b} → {s}\n"
-                        f"Buy @ {bp:.4f} / Sell @ {sp:.4f}\n"
-                        f"Δ={spr:.4f} ({sprpct*100:.3f}%) | 💵 ≈ {net:.3f} USDT\n"
-                    )
-
-                text += f"\nТорговля: {'✅' if trade_enabled else '⛔️'}"
-                bot.send_message(TELEGRAM_CHAT_ID, text)
-
-            time.sleep(POLL_INTERVAL)
-
-        except Exception as e:
-            log.warning(f"Monitor err: {e}")
-            time.sleep(POLL_INTERVAL)
-
-# === ЗАПУСК ================================================
-def telegram_loop():
-    log.info("Запуск Telegram-бота")
-    try:
-        bot.delete_webhook(drop_pending_updates=True)
-    except:
-        pass
-    bot.infinity_polling(timeout=60, long_polling_timeout=60)
-
-if __name__ == "__main__":
-    t1 = threading.Thread(target=monitor_loop, daemon=True)
-    t2 = threading.Thread(target=telegram_loop, daemon=True)
-    t1.start(); t2.start()
-    while True:
-        time.sleep(1)
+    time.sleep(REFRESH_INTERVAL)
