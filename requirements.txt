@@ -1,7 +1,10 @@
-streamlit
-pandas
-aiohttp
-requests
-telebot
-python-dotenv
-bybit
+streamlit==1.50.0
+pandas==2.3.3
+aiohttp==3.13.1
+python-dotenv==1.0.1
+requests==2.32.3
+ccxt==4.3.15
+pyTelegramBotAPI==4.18.1
+bybit==0.2.12
+watchdog==6.0.0
+urllib3==2.2.2
