@@ -3,8 +3,9 @@ pandas==1.5.3
 aiohttp==3.8.6
 python-dotenv==1.0.0
 requests==2.24.0
-ccxt==2.9.0
+ccxt==4.2.83
 pyTelegramBotAPI==4.10.0
 bybit==0.2.12
 watchdog==2.1.9
 urllib3==1.24.2
+
