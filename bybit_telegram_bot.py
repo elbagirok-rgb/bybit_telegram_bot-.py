@@ -5,28 +5,17 @@
 #   ⚙️ Telegram управление, DRY_RUN, Diagnostic Mode
 # ============================================================
 import streamlit as st
-import subprocess, sys
 
 st.title("🤖 Bybit Telegram Bot")
-st.write("Проверка установленных библиотек...")
+st.write("Проверка импортов...")
 
-# Попробуем импортировать telebot, если нет — установим пакет вручную
 try:
     import telebot
     st.success("✅ Модуль telebot установлен и работает!")
-except ModuleNotFoundError:
-    st.warning("⚙️ Устанавливаю библиотеку pyTelegramBotAPI...")
-    subprocess.check_call([sys.executable, "-m", "pip", "install", "pyTelegramBotAPI"])
-    import telebot
-    st.success("✅ telebot успешно установлен!")
+except Exception as e:
+    st.error(f"❌ Ошибка импорта telebot: {e}")
 
 st.write("Стримлит-интерфейс активен, бот выполняется отдельно.")
-
-import streamlit as st
-
-st.title("🤖 Bybit Telegram Bot запущен успешно!")
-st.write("Стримлит-интерфейс активен, бот выполняется отдельно.")
-
 # Добавь кнопку запуска
 if st.button("▶ Запустить Telegram-бота"):
     import threading
