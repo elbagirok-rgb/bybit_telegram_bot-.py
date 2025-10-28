@@ -5,10 +5,24 @@
 #   ⚙️ Telegram управление, DRY_RUN, Diagnostic Mode
 # ============================================================
 import streamlit as st
+
 st.title("🤖 Bybit Telegram Bot запущен успешно!")
-import os, time, threading, logging, random
-import ccxt, telebot
-from telebot import types
+st.write("Стримлит-интерфейс активен, бот выполняется отдельно.")
+
+# Добавь кнопку запуска
+if st.button("▶ Запустить Telegram-бота"):
+    import threading
+    import telebot
+    from telebot import types
+    import ccxt
+    import os, time, random, logging
+
+    def run_bot():
+        # Твой код бота сюда
+        pass
+
+    threading.Thread(target=run_bot).start()
+
 
 # === НАСТРОЙКИ =============================================
 BYBIT_API_KEY    = os.getenv("BYBIT_API_KEY", "bI2fcFjKVNY4W6oQs9")
