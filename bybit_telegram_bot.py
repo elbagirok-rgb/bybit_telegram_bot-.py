@@ -6,6 +6,16 @@
 # ============================================================
 import streamlit as st
 
+st.title("🤖 Bybit Telegram Bot")
+st.write("Проверка импортов...")
+
+try:
+    import telebot
+    st.success("✅ Модуль telebot установлен и работает!")
+except Exception as e:
+    st.error(f"❌ Ошибка импорта telebot: {e}")
+import streamlit as st
+
 st.title("🤖 Bybit Telegram Bot запущен успешно!")
 st.write("Стримлит-интерфейс активен, бот выполняется отдельно.")
 
