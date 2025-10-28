@@ -4,7 +4,8 @@
 #   🧠 Pair Intelligence + 🏆 Топ-5 по ликвидности (24h swap)
 #   ⚙️ Telegram управление, DRY_RUN, Diagnostic Mode
 # ============================================================
-
+import streamlit as st
+st.title("🤖 Bybit Telegram Bot запущен успешно!")
 import os, time, threading, logging, random
 import ccxt, telebot
 from telebot import types
