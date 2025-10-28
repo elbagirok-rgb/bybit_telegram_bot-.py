@@ -4,31 +4,47 @@
 #   🧠 Pair Intelligence + 🏆 Топ-5 по ликвидности (24h swap)
 #   ⚙️ Telegram управление, DRY_RUN, Diagnostic Mode
 # ============================================================
-import streamlit as st
+# ============================================================
+#   Arbitrage Bot v2.6 (Bybit ↔ OKX)
+#   Streamlit Cloud Integration
+# ============================================================
 
+import streamlit as st
+import threading, sys, time, os, logging, random
+
+st.set_page_config(page_title="Bybit Telegram Arbitrage Bot", page_icon="🤖")
 st.title("🤖 Bybit Telegram Bot")
 st.write("Проверка импортов...")
 
+# --- Проверка pyTelegramBotAPI ---
 try:
     import telebot
     st.success("✅ Модуль telebot установлен и работает!")
-except Exception as e:
-    st.error(f"❌ Ошибка импорта telebot: {e}")
+except ModuleNotFoundError:
+    try:
+        import pyTelegramBotAPI as telebot
+        sys.modules["telebot"] = telebot
+        st.success("✅ pyTelegramBotAPI импортирован как telebot!")
+    except Exception as e:
+        st.error(f"❌ Ошибка импорта telebot: {e}")
 
-st.write("Стримлит-интерфейс активен, бот выполняется отдельно.")
-# Добавь кнопку запуска
+st.write("Интерфейс Streamlit активен. Бот запускается отдельно.")
+
+# --- Кнопка запуска ---
 if st.button("▶ Запустить Telegram-бота"):
-    import threading
-    import telebot
-    from telebot import types
-    import ccxt
-    import os, time, random, logging
+    st.info("🚀 Запуск Telegram-бота в отдельном потоке...")
+    def start_bot():
+        try:
+            import ccxt
+            from telebot import types
+            # ✅ Здесь будет весь твой код бота, который уже ниже
+            os.system("echo 'Bot started (mock run for Streamlit Cloud)'")
+            while True:
+                time.sleep(10)
+        except Exception as e:
+            st.error(f"Ошибка внутри бота: {e}")
 
-    def run_bot():
-        # Твой код бота сюда
-        pass
-
-    threading.Thread(target=run_bot).start()
+    threading.Thread(target=start_bot, daemon=True).start()
 
 
 # === НАСТРОЙКИ =============================================
@@ -375,3 +391,7 @@ if __name__ == "__main__":
     t2 = threading.Thread(target=telegram_loop, daemon=True)
     t1.start(); t2.start()
     while True: time.sleep(1)
+
+if __name__ == "__main__":
+    st.write("⏳ Приложение инициализировано. Telegram-бот запускается вручную кнопкой выше.")
+
