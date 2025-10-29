@@ -8,6 +8,10 @@
 #   Arbitrage Bot v2.6 (Bybit ↔ OKX)
 #   Streamlit Cloud Integration
 # ============================================================
+# ============================================================
+#   Arbitrage Bot v2.6 (Bybit ↔ OKX)
+#   Streamlit Cloud Integration
+# ============================================================
 
 import streamlit as st
 import threading, sys, time, os, logging, random
@@ -22,9 +26,9 @@ try:
     st.success("✅ Модуль telebot установлен и работает!")
 except ModuleNotFoundError:
     try:
-        import pyTelegramBotAPI as telebot
+        import pytelegrambotapi as telebot
         sys.modules["telebot"] = telebot
-        st.success("✅ pyTelegramBotAPI импортирован как telebot!")
+        st.success("✅ pytelegrambotapi импортирован как telebot!")
     except Exception as e:
         st.error(f"❌ Ошибка импорта telebot: {e}")
 
@@ -33,18 +37,23 @@ st.write("Интерфейс Streamlit активен. Бот запускает
 # --- Кнопка запуска ---
 if st.button("▶ Запустить Telegram-бота"):
     st.info("🚀 Запуск Telegram-бота в отдельном потоке...")
+
     def start_bot():
-        try:
-            import ccxt
-            from telebot import types
-            # ✅ Здесь будет весь твой код бота, который уже ниже
-            os.system("echo 'Bot started (mock run for Streamlit Cloud)'")
-            while True:
-                time.sleep(10)
-        except Exception as e:
-            st.error(f"Ошибка внутри бота: {e}")
+        import ccxt
+        import telebot
+        from telebot import types
+        import os, time, random, logging
+
+        st.write("✅ CCXT и Telebot успешно импортированы в фоновом потоке!")
+
+        # здесь можно вставить инициализацию бота, но для начала — просто тест:
+        bot = telebot.TeleBot("TEST_TOKEN", parse_mode="HTML")
+        print("Бот инициализирован, идёт тестовый цикл...")
+        while True:
+            time.sleep(10)
 
     threading.Thread(target=start_bot, daemon=True).start()
+
 
 
 # === НАСТРОЙКИ =============================================
